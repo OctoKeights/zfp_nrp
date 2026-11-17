@@ -1,8 +1,8 @@
-//! Made-up data, the same from a seed here as in the C side of the comparison
-//! (`compare/`), and the dumps the tests run as well as the comparison (`examples/dump.rs`).
+//! Synthetic data, generated from a seed exactly as the C side of the comparison
+//! (`compare/dump_zfp.c`) generates it, and the dump that both the golden tests and
+//! `examples/dump.rs` run.
 
-// (The arithmetic is written as the C side has it; not every user of this module uses all of
-// it.)
+// The arithmetic mirrors the C side, and not every user of this module uses all of it.
 #![allow(
     clippy::manual_is_multiple_of,
     clippy::needless_range_loop,
@@ -152,7 +152,7 @@ fn make_block(r: &mut Random) -> [f32; 16] {
 
 /// The made-up settings, blocks and streams of `compare/dump_zfp.c`, hashed.
 pub fn zfp(seed: u64, count: u32) -> String {
-    use zfp_nrp::{BitStream, ZfpStream, decode_block_float_2, encode_block_float_2};
+    use zfp_nrp::{BitStream, Settings};
     let mut r = Random { state: seed };
     let mut hash = Hash::new();
     let mut out = String::new();
@@ -160,52 +160,68 @@ pub fn zfp(seed: u64, count: u32) -> String {
     fn add(hash: &mut Hash, value: u32) {
         hash.add(&value.to_le_bytes());
     }
-    fn decode_all(zfp: &ZfpStream, hash: &mut Hash, bytes: &[u8], words: usize, nblocks: usize) {
-        let mut s = BitStream::from_bytes(bytes, words);
-        for _ in 0..nblocks {
+    fn decode_all(settings: &Settings, hash: &mut Hash, bytes: &[u8], words: usize, blocks: usize) {
+        let mut stream = BitStream::from_bytes(bytes, words);
+        for _ in 0..blocks {
             let mut block = [0f32; 16];
-            add(hash, decode_block_float_2(zfp, &mut s, &mut block));
-            for v in block {
-                add(hash, v.to_bits());
+            add(hash, settings.decode_block(&mut stream, &mut block) as u32);
+            for value in block {
+                add(hash, value.to_bits());
             }
         }
-        add(hash, s.rtell() as u32);
+        add(hash, stream.read_position() as u32);
     }
     for round in 0..count {
-        let mut zfp = ZfpStream::open();
+        // What zfp's zfp_stream_set_* functions return is hashed too: the rate, the precision
+        // or the tolerance they set.
         let mode = r.next() % 4;
         add(&mut hash, mode);
-        if mode == 0 {
-            let rate = make_rate(&mut r);
-            hash.add(&zfp.set_rate(rate).to_bits().to_le_bytes());
-        } else if mode == 1 {
-            let precision = r.next() % 70;
-            add(&mut hash, zfp.set_precision(precision));
-        } else if mode == 2 {
-            let tolerance = make_tolerance(&mut r);
-            hash.add(&zfp.set_accuracy(tolerance).to_bits().to_le_bytes());
-        }
-        add(&mut hash, zfp.minbits());
-        add(&mut hash, zfp.maxbits());
-        add(&mut hash, zfp.maxprec());
-        add(&mut hash, zfp.minexp() as u32);
+        let settings = match mode {
+            0 => {
+                let settings = Settings::fixed_rate(make_rate(&mut r));
+                let rate = f64::from(settings.max_bits()) / 16.0;
+                hash.add(&rate.to_bits().to_le_bytes());
+                settings
+            }
+            1 => {
+                let settings = Settings::fixed_precision(r.next() % 70);
+                add(&mut hash, settings.max_precision());
+                settings
+            }
+            2 => {
+                let tolerance = make_tolerance(&mut r);
+                let settings = Settings::fixed_accuracy(tolerance);
+                let set = if tolerance > 0.0 {
+                    power_of_two(settings.min_exponent())
+                } else {
+                    0.0
+                };
+                hash.add(&set.to_bits().to_le_bytes());
+                settings
+            }
+            _ => Settings::new(),
+        };
+        add(&mut hash, settings.min_bits());
+        add(&mut hash, settings.max_bits());
+        add(&mut hash, settings.max_precision());
+        add(&mut hash, settings.min_exponent() as u32);
         let (nx, ny) = ((r.next() % 300) as usize, (r.next() % 300) as usize);
-        add(&mut hash, zfp.maximum_size(nx, ny) as u32);
+        add(&mut hash, settings.max_stream_len(nx, ny) as u32);
 
-        let nblocks = 1 + (r.next() % 40) as usize;
-        let words = zfp.maximum_size(4 * nblocks, 4) / 8;
+        let blocks = 1 + (r.next() % 40) as usize;
+        let words = settings.max_stream_len(4 * blocks, 4) / 8;
         // (Settings of more than eight megabytes a stream are left at that.)
         if words <= 1 << 20 {
-            let mut s = BitStream::new(vec![0; words]);
-            for _ in 0..nblocks {
+            let mut stream = BitStream::new(vec![0; words]);
+            for _ in 0..blocks {
                 let block = make_block(&mut r);
-                add(&mut hash, encode_block_float_2(&zfp, &mut s, &block));
+                add(&mut hash, settings.encode_block(&mut stream, &block) as u32);
             }
-            add(&mut hash, s.flush());
-            let mut bytes = s.to_bytes();
+            add(&mut hash, stream.flush());
+            let mut bytes = stream.to_bytes();
             add(&mut hash, bytes.len() as u32);
             hash.add(&bytes);
-            decode_all(&zfp, &mut hash, &bytes, words, nblocks);
+            decode_all(&settings, &mut hash, &bytes, words, blocks);
 
             if r.next() % 2 == 0 && !bytes.is_empty() {
                 let flips = 1 + r.next() % 4;
@@ -213,13 +229,13 @@ pub fn zfp(seed: u64, count: u32) -> String {
                     let bit = r.next() % (bytes.len() as u32 * 8);
                     bytes[(bit >> 3) as usize] ^= 1 << (bit & 7);
                 }
-                decode_all(&zfp, &mut hash, &bytes, words, nblocks);
+                decode_all(&settings, &mut hash, &bytes, words, blocks);
             }
             if round % 4 == 0 {
                 let garbage: Vec<u8> = (0..words * 8).map(|_| r.next() as u8).collect();
-                decode_all(&zfp, &mut hash, &garbage, words, nblocks);
+                decode_all(&settings, &mut hash, &garbage, words, blocks);
             }
-            total += nblocks as u64;
+            total += blocks as u64;
         }
         if (round + 1) % 200 == 0 || round + 1 == count {
             out += &format!("zfp {} {:016x}\n", round + 1, hash.value);

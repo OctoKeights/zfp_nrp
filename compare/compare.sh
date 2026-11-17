@@ -3,10 +3,10 @@
 #
 #   compare/compare.sh <checkout of zfp> [count] [seeds] [dumps]
 #
-# compare/dump_zfp.c is built against zfp's library as it builds by default, and
-# examples/dump.rs from the port; both run the same made-up data for each seed and what they
-# print is compared byte for byte. Dump: zfp, with a tenth of [count] (200,000 by default) as the
-# number of made-up streams, each with its settings and up to 40 blocks.
+# compare/dump_zfp.c is built against zfp's library with its default configuration, and
+# examples/dump.rs against zfp_nrp. Both run the same synthetic data for each seed, and their
+# output is compared byte for byte. The zfp dump runs a tenth of [count] (200,000 by default)
+# streams, each with its own settings and up to 40 blocks.
 set -u
 if [ $# -lt 1 ]; then
     echo "usage: $0 <checkout of zfp> [count] [seeds] [dumps]" >&2

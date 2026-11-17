@@ -1,10 +1,10 @@
-//! The port of zfp against results recorded from the original, so that a change shows without
-//! a C compiler at hand.
+//! zfp_nrp against hashes recorded from zfp, so that any change in output shows without a C
+//! compiler.
 //!
-//! `tests/data/zfp_expected.txt` is what `compare/dump_zfp.c`, built against zfp 1.0.1 (see
-//! `compare/compare.sh`), prints for `zfp 3 600` and `zfp 8 600`: a hash of made-up settings
-//! in each mode, of the blocks coded with them and of what each stream, whole, damaged and made
-//! up, decodes to. `compare/compare.sh` is the full comparison.
+//! `tests/data/zfp_expected.txt` is what `compare/dump_zfp.c`, built against zfp 1.0.1,
+//! prints for `zfp 3 600` and `zfp 8 600`: hashes of synthetic settings in every mode, of the
+//! blocks coded with them, and of what each stream decodes to, intact, damaged and random.
+//! `compare/compare.sh` runs the full comparison.
 
 mod made_up;
 

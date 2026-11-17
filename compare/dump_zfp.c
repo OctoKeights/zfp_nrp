@@ -1,14 +1,13 @@
-/* The C half of the comparison with the zfp library (https://github.com/LLNL/zfp) v1.0.1: sets
-   up streams in each of its modes with made-up settings, codes made-up blocks of four by four
-   floats into them and decodes them back, whole, damaged and made up, and prints a running
-   hash of what comes out. examples/dump.rs prints the same from the Rust port, and
-   compare/compare.sh compares the two.
+/* The C side of the comparison with the zfp library (https://github.com/LLNL/zfp) v1.0.1:
+   sets up streams in every mode with synthetic settings, codes synthetic 4 x 4 blocks of
+   floats into them, decodes them intact, damaged and random, and prints a running hash of
+   the output. examples/dump.rs prints the same from zfp_nrp, and compare/compare.sh compares
+   the two.
 
-     dump zfp <seed> <count>   made-up settings of a stream: a rate, a precision, a tolerance
-                               or zfp's defaults, with the most bytes of a made-up field;
-                               blocks of eight kinds coded with them, the stream flushed,
-                               and decoded; now and then with some of its bits flipped; and
-                               made-up words decoded */
+     dump zfp <seed> <count>   synthetic settings in every mode, with the maximum stream size
+                               of a random field; blocks of eight kinds coded with them; each
+                               stream decoded intact, with bits flipped, and random words
+                               decoded */
 #include "zfp.h"
 
 #include <stdint.h>

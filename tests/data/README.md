@@ -1,12 +1,14 @@
 # Recorded results
 
-`zfp_expected.txt` is what the zfp library makes of made-up settings and blocks, as
-`compare/dump_zfp.c` prints it; `tests/golden.rs` checks that the port prints the same. To make
-it again, run the comparison once (it builds the original's side), then that by itself:
+`zfp_expected.txt` holds the hashes `compare/dump_zfp.c` prints when built against zfp
+1.0.1, for synthetic settings and blocks. `tests/golden.rs` checks that zfp_nrp prints the
+same.
+
+To record them again, run the comparison once, which builds zfp's side, then run that
+program directly:
 
     compare/compare.sh <checkout of zfp> 3000 1
     ref="${TMPDIR:-/tmp}/zfp_nrp-compare/dump-zfp"
     { "$ref" zfp 3 600; "$ref" zfp 8 600; } > tests/data/zfp_expected.txt
 
-No picture or file from anywhere is in this repository: every file and stream the tests and
-the comparison use is made up from a seed.
+All test data is generated from seeds; no external files are used.

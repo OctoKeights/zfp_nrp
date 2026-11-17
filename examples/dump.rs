@@ -1,12 +1,11 @@
-//! The Rust half of the comparison with zfp: runs the port over made-up data and
-//! prints a running hash of what comes out, as `compare/dump_zfp.c` does with the original.
-//! `compare/compare.sh` compares the two.
+//! The Rust side of the comparison with zfp: runs zfp_nrp over synthetic data and prints a
+//! running hash of its output, as `compare/dump_zfp.c` does with zfp. `compare/compare.sh`
+//! compares the two.
 //!
-//!   dump zfp <seed> <count>   made-up settings of a stream: a rate, a precision, a tolerance
-//!                             or zfp's defaults, with the most bytes of a made-up field;
-//!                             blocks of eight kinds coded with them, the stream flushed, and
-//!                             decoded; now and then with some of its bits flipped; and made-up
-//!                             words decoded
+//!   dump zfp <seed> <count>   synthetic settings in every mode, with the maximum stream size
+//!                             of a random field; blocks of eight kinds coded with them; each
+//!                             stream decoded intact, with bits flipped, and random words
+//!                             decoded
 
 #[path = "../tests/made_up/mod.rs"]
 mod made_up;

@@ -1,421 +1,417 @@
-//! The coder of a block of four by four floats: a port of zfp's `template/encode.c`,
-//! `template/encodef.c`, `template/encode2.c`, `template/decode*.c` and `template/codec*.c`
-//! for floats in two dimensions.
+//! The block coder for `f32` values in two dimensions: zfp's `template/encode*.c`,
+//! `template/decode*.c` and `template/codec*.c`, as built without `ZFP_WITH_DAZ` and with
+//! its default rounding.
 
-use crate::{BLOCK_SIZE, BitStream, ZfpStream, float_to_int, power_of_two};
+use crate::{BLOCK_LEN, BitStream, Block, Settings, power_of_two, x86_f32_to_i32};
 
-/// Of floats: `EBITS`, `EBIAS`, `NBMASK`.
-const EBITS: u32 = 8;
-const EBIAS: i32 = (1 << (EBITS - 1)) - 1;
-const NBMASK: u32 = 0xaaaa_aaaa;
+/// Bits of a float's exponent, and its bias.
+const EXPONENT_BITS: u32 = 8;
+const EXPONENT_BIAS: i32 = 127;
 
-/// `perm_2`: coefficients by i + j, then by i² + j².
-const PERM_2: [usize; 16] = [0, 1, 4, 5, 2, 8, 6, 9, 3, 12, 10, 7, 13, 11, 14, 15];
+/// The bits of the precision the integers are coded at: 32 for `f32`.
+const INT_PRECISION: u32 = 32;
 
-/// `precision`: the planes of bits to code of a block with the exponent `maxexp`.
-fn precision(maxexp: i32, maxprec: u32, minexp: i32) -> u32 {
-    maxprec.min((maxexp - minexp + 2 * 2 + 2).max(0) as u32)
-}
+/// Alternating ones and zeros, to map two's-complement integers to "negabinary" so that
+/// small magnitudes of either sign have few significant bits.
+const NEGABINARY_MASK: u32 = 0xaaaa_aaaa;
 
-/// `with_maxbits`: whether the most a block can take is more than `maxbits`.
-fn with_maxbits(maxbits: u32, maxprec: u32, size: u32) -> bool {
-    (maxprec + 1) * size - 1 > maxbits
-}
+/// The coefficients of a transformed block in order of increasing frequency: by `i + j`,
+/// then by `i² + j²` (`perm_2`).
+const SEQUENCY_ORDER: [usize; BLOCK_LEN] = [0, 1, 4, 5, 2, 8, 6, 9, 3, 12, 10, 7, 13, 11, 14, 15];
 
-/// `exponent`: the exponent of a value of no less than nothing, -127 for nothing.
-fn exponent(x: f32) -> i32 {
-    // use e = -EBIAS when x = 0
-    let mut e = -EBIAS;
-    if x > 0.0 {
-        let bits = x.to_bits();
-        let biased = (bits >> 23) as i32;
-        // (frexpf: 0 for an infinity; a subnormal's own, which is below the clamp.)
-        e = if biased == 0xff {
-            0
-        } else if biased == 0 {
-            -126
-        } else {
-            biased - 126
-        };
-        // clamp exponent in case x is subnormal; may still result in overflow
-        e = e.max(1 - EBIAS);
+/// Codes `block` into `stream` and returns the bits written.
+pub(crate) fn encode_block(settings: &Settings, stream: &mut BitStream, block: &Block) -> u32 {
+    let max_exponent = block_exponent(block);
+    let precision = precision(max_exponent, settings);
+    let biased_exponent = if precision == 0 {
+        0
+    } else {
+        (max_exponent + EXPONENT_BIAS) as u32
+    };
+
+    if biased_exponent == 0 {
+        // A single zero bit says every value is zero.
+        stream.write_bit(false);
+        return pad_to_min_bits(stream, settings, 1);
     }
-    e
+
+    // The exponent, shifted left past a one bit that says the block is not all zero.
+    let header_bits = 1 + EXPONENT_BITS;
+    stream.write_bits(u64::from(2 * biased_exponent + 1), header_bits);
+
+    // Block floating point: every value as an integer scaled by the largest one's exponent.
+    let scale = power_of_two(30 - max_exponent);
+    let mut ints = block.map(|value| x86_f32_to_i32(scale * value));
+
+    header_bits
+        + encode_ints(
+            stream,
+            settings.min_bits.saturating_sub(header_bits),
+            settings.max_bits - header_bits,
+            precision,
+            &mut ints,
+        )
 }
 
-/// `exponent_block`: the exponent of the largest value of a block (what is not a number left
-/// out).
-fn exponent_block(block: &[f32; BLOCK_SIZE]) -> i32 {
-    let mut max = 0f32;
-    for &value in block {
-        let f = value.abs();
-        if max < f {
-            max = f;
+/// Decodes a block from `stream` into `block` and returns the bits read.
+pub(crate) fn decode_block(settings: &Settings, stream: &mut BitStream, block: &mut Block) -> u32 {
+    if !stream.read_bit() {
+        *block = [0.0; BLOCK_LEN];
+        return skip_to_min_bits(stream, settings, 1);
+    }
+
+    let header_bits = 1 + EXPONENT_BITS;
+    let max_exponent = stream.read_bits(EXPONENT_BITS) as i32 - EXPONENT_BIAS;
+    let precision = precision(max_exponent, settings);
+
+    let mut ints = [0i32; BLOCK_LEN];
+    let bits = decode_ints(
+        stream,
+        settings.min_bits.saturating_sub(header_bits),
+        settings.max_bits - header_bits,
+        precision,
+        &mut ints,
+    );
+
+    let scale = power_of_two(max_exponent - 30);
+    *block = ints.map(|int| scale * int as f32);
+    header_bits + bits
+}
+
+/// Pads an all-zero block of `bits` bits up to the settings' minimum.
+fn pad_to_min_bits(stream: &mut BitStream, settings: &Settings, bits: u32) -> u32 {
+    if settings.min_bits > bits {
+        stream.pad(settings.min_bits - bits);
+        settings.min_bits
+    } else {
+        bits
+    }
+}
+
+/// Skips the padding [`pad_to_min_bits`] wrote.
+fn skip_to_min_bits(stream: &mut BitStream, settings: &Settings, bits: u32) -> u32 {
+    if settings.min_bits > bits {
+        stream.skip(settings.min_bits - bits);
+        settings.min_bits
+    } else {
+        bits
+    }
+}
+
+/// The bit planes to code for a block whose largest exponent is `max_exponent`.
+fn precision(max_exponent: i32, settings: &Settings) -> u32 {
+    let planes = (max_exponent - settings.min_exponent + 6).max(0) as u32;
+    settings.max_precision.min(planes)
+}
+
+/// The exponent of the largest magnitude in a block, ignoring NaN; -127 for an all-zero
+/// block.
+fn block_exponent(block: &Block) -> i32 {
+    let max = block
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0f32, |max, value| if max < value { value } else { max });
+    if max > 0.0 {
+        // As frexpf gives it (0 for infinity), clamped to the smallest normal exponent.
+        match max.to_bits() >> 23 {
+            0xff => 0,
+            biased => (biased as i32 - 126).max(1 - EXPONENT_BIAS),
         }
+    } else {
+        -EXPONENT_BIAS
     }
-    exponent(max)
 }
 
-/// `fwd_lift`: the forward transform of the four values from `at`, `s` apart.
-fn fwd_lift(p: &mut [i32; BLOCK_SIZE], at: usize, s: usize) {
-    let (mut x, mut y, mut z, mut w) = (p[at], p[at + s], p[at + 2 * s], p[at + 3 * s]);
-    x = x.wrapping_add(w);
-    x >>= 1;
+/// Transforms, reorders and codes a block of integers, padding to `min_bits`. Returns the
+/// bits written.
+fn encode_ints(
+    stream: &mut BitStream,
+    min_bits: u32,
+    max_bits: u32,
+    precision: u32,
+    ints: &mut [i32; BLOCK_LEN],
+) -> u32 {
+    forward_transform(ints);
+    let coefficients = SEQUENCY_ORDER.map(|at| to_negabinary(ints[at]));
+
+    let bits = if is_rate_limited(max_bits, precision) {
+        encode_planes_limited(stream, max_bits, precision, &coefficients)
+    } else {
+        encode_planes(stream, precision, &coefficients)
+    };
+    if bits < min_bits {
+        stream.pad(min_bits - bits);
+        min_bits
+    } else {
+        bits
+    }
+}
+
+/// Decodes, reorders and inverse-transforms a block of integers, skipping to `min_bits`.
+/// Returns the bits read.
+fn decode_ints(
+    stream: &mut BitStream,
+    min_bits: u32,
+    max_bits: u32,
+    precision: u32,
+    ints: &mut [i32; BLOCK_LEN],
+) -> u32 {
+    let mut coefficients = [0u32; BLOCK_LEN];
+    let mut bits = if is_rate_limited(max_bits, precision) {
+        decode_planes_limited(stream, max_bits, precision, &mut coefficients)
+    } else {
+        decode_planes(stream, precision, &mut coefficients)
+    };
+    if bits < min_bits {
+        stream.skip(min_bits - bits);
+        bits = min_bits;
+    }
+
+    for (&coefficient, &at) in coefficients.iter().zip(&SEQUENCY_ORDER) {
+        ints[at] = from_negabinary(coefficient);
+    }
+    inverse_transform(ints);
+    bits
+}
+
+/// Whether `max_bits` can cut a block short: the most a block can take at `precision` is
+/// more than it.
+fn is_rate_limited(max_bits: u32, precision: u32) -> bool {
+    let len = BLOCK_LEN as u32;
+    (precision + 1) * len - 1 > max_bits
+}
+
+#[inline]
+fn to_negabinary(value: i32) -> u32 {
+    (value as u32).wrapping_add(NEGABINARY_MASK) ^ NEGABINARY_MASK
+}
+
+#[inline]
+fn from_negabinary(value: u32) -> i32 {
+    (value ^ NEGABINARY_MASK).wrapping_sub(NEGABINARY_MASK) as i32
+}
+
+/// The decorrelating transform: along each row, then along each column.
+fn forward_transform(ints: &mut [i32; BLOCK_LEN]) {
+    for row in 0..4 {
+        forward_lift(ints, 4 * row, 1);
+    }
+    for column in 0..4 {
+        forward_lift(ints, column, 4);
+    }
+}
+
+/// The inverse of [`forward_transform`]: along each column, then along each row.
+fn inverse_transform(ints: &mut [i32; BLOCK_LEN]) {
+    for column in 0..4 {
+        inverse_lift(ints, column, 4);
+    }
+    for row in 0..4 {
+        inverse_lift(ints, 4 * row, 1);
+    }
+}
+
+/// The forward lifting transform of the four values from `start`, `stride` apart.
+#[inline]
+fn forward_lift(ints: &mut [i32; BLOCK_LEN], start: usize, stride: usize) {
+    let at = [
+        start,
+        start + stride,
+        start + 2 * stride,
+        start + 3 * stride,
+    ];
+    let [mut x, mut y, mut z, mut w] = at.map(|i| ints[i]);
+    x = x.wrapping_add(w) >> 1;
     w = w.wrapping_sub(x);
-    z = z.wrapping_add(y);
-    z >>= 1;
+    z = z.wrapping_add(y) >> 1;
     y = y.wrapping_sub(z);
-    x = x.wrapping_add(z);
-    x >>= 1;
+    x = x.wrapping_add(z) >> 1;
     z = z.wrapping_sub(x);
-    w = w.wrapping_add(y);
-    w >>= 1;
+    w = w.wrapping_add(y) >> 1;
     y = y.wrapping_sub(w);
     w = w.wrapping_add(y >> 1);
     y = y.wrapping_sub(w >> 1);
-    p[at] = x;
-    p[at + s] = y;
-    p[at + 2 * s] = z;
-    p[at + 3 * s] = w;
+    for (i, value) in at.into_iter().zip([x, y, z, w]) {
+        ints[i] = value;
+    }
 }
 
-/// `inv_lift`.
-fn inv_lift(p: &mut [i32; BLOCK_SIZE], at: usize, s: usize) {
-    let (mut x, mut y, mut z, mut w) = (p[at], p[at + s], p[at + 2 * s], p[at + 3 * s]);
+/// The inverse of [`forward_lift`].
+#[inline]
+fn inverse_lift(ints: &mut [i32; BLOCK_LEN], start: usize, stride: usize) {
+    let at = [
+        start,
+        start + stride,
+        start + 2 * stride,
+        start + 3 * stride,
+    ];
+    let [mut x, mut y, mut z, mut w] = at.map(|i| ints[i]);
     y = y.wrapping_add(w >> 1);
     w = w.wrapping_sub(y >> 1);
     y = y.wrapping_add(w);
-    w = w.wrapping_shl(1);
-    w = w.wrapping_sub(y);
+    w = (w << 1).wrapping_sub(y);
     z = z.wrapping_add(x);
-    x = x.wrapping_shl(1);
-    x = x.wrapping_sub(z);
+    x = (x << 1).wrapping_sub(z);
     y = y.wrapping_add(z);
-    z = z.wrapping_shl(1);
-    z = z.wrapping_sub(y);
+    z = (z << 1).wrapping_sub(y);
     w = w.wrapping_add(x);
-    x = x.wrapping_shl(1);
-    x = x.wrapping_sub(w);
-    p[at] = x;
-    p[at + s] = y;
-    p[at + 2 * s] = z;
-    p[at + 3 * s] = w;
+    x = (x << 1).wrapping_sub(w);
+    for (i, value) in at.into_iter().zip([x, y, z, w]) {
+        ints[i] = value;
+    }
 }
 
-/// `encode_few_ints`: the planes of bits of up to 64 integers, no more than `maxbits` bits.
-fn encode_few_ints(s: &mut BitStream, maxbits: u32, maxprec: u32, data: &[u32; BLOCK_SIZE]) -> u32 {
-    let size = BLOCK_SIZE as u32;
-    let intprec = 32u32;
-    let kmin = intprec.saturating_sub(maxprec);
-    let mut bits = maxbits;
-    let (mut k, mut n) = (intprec, 0u32);
+/// Bit plane `plane` of the coefficients, coefficient `i` in bit `i`.
+#[inline]
+fn bit_plane(coefficients: &[u32; BLOCK_LEN], plane: u32) -> u64 {
+    coefficients
+        .iter()
+        .enumerate()
+        .fold(0, |bits, (i, &value)| {
+            bits | u64::from((value >> plane) & 1) << i
+        })
+}
 
-    // encode one bit plane at a time from MSB to LSB
-    while bits != 0 && k > kmin {
-        k -= 1;
-        // step 1: extract bit plane #k to x
-        let mut x = 0u64;
-        for (i, &value) in data.iter().enumerate() {
-            x += u64::from((value >> k) & 1) << i;
+/// Adds bit plane `plane`, coefficient `i` in bit `i` of `bits`, to the coefficients.
+#[inline]
+fn deposit_bit_plane(coefficients: &mut [u32; BLOCK_LEN], plane: u32, mut bits: u64) {
+    // (A plain scan up to the highest set bit measured fastest across the modes.)
+    let mut i = 0;
+    while bits != 0 {
+        coefficients[i] += ((bits & 1) as u32) << plane;
+        bits >>= 1;
+        i += 1;
+    }
+}
+
+/// The lowest bit plane coded at `precision`: planes `INT_PRECISION - 1` down to it are
+/// coded, most significant first.
+#[inline]
+fn lowest_plane(precision: u32) -> u32 {
+    INT_PRECISION.saturating_sub(precision)
+}
+
+/// Codes the bit planes of the coefficients, at most `max_bits` bits in all. Returns the
+/// bits written.
+///
+/// Each plane starts with the bits of the coefficients already known to be significant;
+/// the rest are run-length coded with group tests: a one bit says another significant
+/// coefficient follows, found by scanning for its one bit.
+fn encode_planes_limited(
+    stream: &mut BitStream,
+    max_bits: u32,
+    precision: u32,
+    coefficients: &[u32; BLOCK_LEN],
+) -> u32 {
+    let len = BLOCK_LEN as u32;
+    let mut bits = max_bits;
+    let mut significant = 0;
+    for plane in (lowest_plane(precision)..INT_PRECISION).rev() {
+        if bits == 0 {
+            break;
         }
-        // step 2: encode first n bits of bit plane
-        let m = n.min(bits);
-        bits -= m;
-        x = s.write_bits(x, m);
-        // step 3: unary run-length encode remainder of bit plane
-        while bits != 0 && n < size {
+        let mut x = bit_plane(coefficients, plane);
+        let verbatim = significant.min(bits);
+        bits -= verbatim;
+        x = stream.write_bits(x, verbatim);
+
+        while bits != 0 && significant < len {
             bits -= 1;
-            if s.write_bit(u32::from(x != 0)) != 0 {
-                // positive group test (x != 0); scan for one-bit
-                while bits != 0 && n < size - 1 {
-                    bits -= 1;
-                    if s.write_bit((x & 1) as u32) != 0 {
-                        break;
-                    }
-                    x >>= 1;
-                    n += 1;
-                }
-            } else {
-                // negative group test (x == 0); done with bit plane
+            if !stream.write_bit(x != 0) {
                 break;
             }
-            x >>= 1;
-            n += 1;
-        }
-    }
-
-    maxbits - bits
-}
-
-/// `encode_few_ints_prec`: the planes of bits of up to 64 integers, without a limit.
-fn encode_few_ints_prec(s: &mut BitStream, maxprec: u32, data: &[u32; BLOCK_SIZE]) -> u32 {
-    let offset = s.wtell();
-    let size = BLOCK_SIZE as u32;
-    let intprec = 32u32;
-    let kmin = intprec.saturating_sub(maxprec);
-    let (mut k, mut n) = (intprec, 0u32);
-
-    // encode one bit plane at a time from MSB to LSB
-    while k > kmin {
-        k -= 1;
-        // step 1: extract bit plane #k to x
-        let mut x = 0u64;
-        for (i, &value) in data.iter().enumerate() {
-            x += u64::from((value >> k) & 1) << i;
-        }
-        // step 2: encode first n bits of bit plane
-        x = s.write_bits(x, n);
-        // step 3: unary run-length encode remainder of bit plane
-        while n < size && s.write_bit(u32::from(x != 0)) != 0 {
-            while n < size - 1 && s.write_bit((x & 1) as u32) == 0 {
+            while bits != 0 && significant < len - 1 {
+                bits -= 1;
+                if stream.write_bit(x & 1 != 0) {
+                    break;
+                }
                 x >>= 1;
-                n += 1;
+                significant += 1;
             }
             x >>= 1;
-            n += 1;
+            significant += 1;
         }
     }
-
-    (s.wtell() - offset) as u32
+    max_bits - bits
 }
 
-/// `decode_few_ints`.
-fn decode_few_ints(
-    s: &mut BitStream,
-    maxbits: u32,
-    maxprec: u32,
-    data: &mut [u32; BLOCK_SIZE],
+/// Codes the bit planes of the coefficients without a limit on the bits. Returns the bits
+/// written.
+fn encode_planes(stream: &mut BitStream, precision: u32, coefficients: &[u32; BLOCK_LEN]) -> u32 {
+    let len = BLOCK_LEN as u32;
+    let start = stream.write_position();
+    let mut significant = 0;
+    for plane in (lowest_plane(precision)..INT_PRECISION).rev() {
+        let mut x = stream.write_bits(bit_plane(coefficients, plane), significant);
+        while significant < len && stream.write_bit(x != 0) {
+            while significant < len - 1 && !stream.write_bit(x & 1 != 0) {
+                x >>= 1;
+                significant += 1;
+            }
+            x >>= 1;
+            significant += 1;
+        }
+    }
+    (stream.write_position() - start) as u32
+}
+
+/// Decodes what [`encode_planes_limited`] writes. Returns the bits read.
+fn decode_planes_limited(
+    stream: &mut BitStream,
+    max_bits: u32,
+    precision: u32,
+    coefficients: &mut [u32; BLOCK_LEN],
 ) -> u32 {
-    let size = BLOCK_SIZE as u32;
-    let intprec = 32u32;
-    let kmin = intprec.saturating_sub(maxprec);
-    let mut bits = maxbits;
-    let (mut k, mut n) = (intprec, 0u32);
+    let len = BLOCK_LEN as u32;
+    let mut bits = max_bits;
+    let mut significant = 0;
+    for plane in (lowest_plane(precision)..INT_PRECISION).rev() {
+        if bits == 0 {
+            break;
+        }
+        let verbatim = significant.min(bits);
+        bits -= verbatim;
+        let mut x = stream.read_bits(verbatim);
 
-    // initialize data array to all zeros
-    *data = [0; BLOCK_SIZE];
-
-    // decode one bit plane at a time from MSB to LSB
-    while bits != 0 && k > kmin {
-        k -= 1;
-        // step 1: decode first n bits of bit plane #k
-        let m = n.min(bits);
-        bits -= m;
-        let mut x = s.read_bits(m);
-        // step 2: unary run-length decode remainder of bit plane
-        while bits != 0 && n < size {
+        while bits != 0 && significant < len {
             bits -= 1;
-            if s.read_bit() != 0 {
-                // positive group test; scan for next one-bit
-                while bits != 0 && n < size - 1 {
-                    bits -= 1;
-                    if s.read_bit() != 0 {
-                        break;
-                    }
-                    n += 1;
-                }
-                // set bit and continue decoding bit plane
-                x += 1u64 << n;
-            } else {
-                // negative group test; done with bit plane
+            if !stream.read_bit() {
                 break;
             }
-            n += 1;
-        }
-        // step 3: deposit bit plane from x
-        let mut i = 0;
-        while x != 0 {
-            data[i] = data[i].wrapping_add(((x & 1) as u32) << k);
-            i += 1;
-            x >>= 1;
-        }
-    }
-
-    maxbits - bits
-}
-
-/// `decode_few_ints_prec`.
-fn decode_few_ints_prec(s: &mut BitStream, maxprec: u32, data: &mut [u32; BLOCK_SIZE]) -> u32 {
-    let offset = s.rtell();
-    let size = BLOCK_SIZE as u32;
-    let intprec = 32u32;
-    let kmin = intprec.saturating_sub(maxprec);
-    let (mut k, mut n) = (intprec, 0u32);
-
-    // initialize data array to all zeros
-    *data = [0; BLOCK_SIZE];
-
-    // decode one bit plane at a time from MSB to LSB
-    while k > kmin {
-        k -= 1;
-        // step 1: decode first n bits of bit plane #k
-        let mut x = s.read_bits(n);
-        // step 2: unary run-length decode remainder of bit plane
-        while n < size && s.read_bit() != 0 {
-            while n < size - 1 && s.read_bit() == 0 {
-                n += 1;
+            while bits != 0 && significant < len - 1 {
+                bits -= 1;
+                if stream.read_bit() {
+                    break;
+                }
+                significant += 1;
             }
-            x += 1u64 << n;
-            n += 1;
+            x += 1 << significant;
+            significant += 1;
         }
-        // step 3: deposit bit plane from x
-        let mut i = 0;
-        while x != 0 {
-            data[i] = data[i].wrapping_add(((x & 1) as u32) << k);
-            i += 1;
-            x >>= 1;
-        }
+        deposit_bit_plane(coefficients, plane, x);
     }
-
-    (s.rtell() - offset) as u32
+    max_bits - bits
 }
 
-/// `encode_block` of integers: transformed, reordered, and their planes of bits, with at
-/// least `minbits` bits.
-fn encode_int_block(
-    s: &mut BitStream,
-    minbits: u32,
-    maxbits: u32,
-    maxprec: u32,
-    iblock: &mut [i32; BLOCK_SIZE],
+/// Decodes what [`encode_planes`] writes. Returns the bits read.
+fn decode_planes(
+    stream: &mut BitStream,
+    precision: u32,
+    coefficients: &mut [u32; BLOCK_LEN],
 ) -> u32 {
-    // perform decorrelating transform: along x, then along y
-    for y in 0..4 {
-        fwd_lift(iblock, 4 * y, 1);
-    }
-    for x in 0..4 {
-        fwd_lift(iblock, x, 4);
-    }
-    // reorder signed coefficients and convert to unsigned integer
-    let mut ublock = [0u32; BLOCK_SIZE];
-    for (u, &at) in ublock.iter_mut().zip(PERM_2.iter()) {
-        *u = (iblock[at] as u32).wrapping_add(NBMASK) ^ NBMASK;
-    }
-    // encode integer coefficients
-    let mut bits = if with_maxbits(maxbits, maxprec, BLOCK_SIZE as u32) {
-        encode_few_ints(s, maxbits, maxprec, &ublock)
-    } else {
-        encode_few_ints_prec(s, maxprec, &ublock)
-    };
-    // write at least minbits bits by padding with zeros
-    if bits < minbits {
-        s.pad(minbits - bits);
-        bits = minbits;
-    }
-    bits
-}
-
-/// `decode_block` of integers.
-fn decode_int_block(
-    s: &mut BitStream,
-    minbits: u32,
-    maxbits: u32,
-    maxprec: u32,
-    iblock: &mut [i32; BLOCK_SIZE],
-) -> u32 {
-    let mut ublock = [0u32; BLOCK_SIZE];
-    // decode integer coefficients
-    let mut bits = if with_maxbits(maxbits, maxprec, BLOCK_SIZE as u32) {
-        decode_few_ints(s, maxbits, maxprec, &mut ublock)
-    } else {
-        decode_few_ints_prec(s, maxprec, &mut ublock)
-    };
-    // read at least minbits bits
-    if bits < minbits {
-        s.skip(minbits - bits);
-        bits = minbits;
-    }
-    // reorder unsigned coefficients and convert to signed integer
-    for (&u, &at) in ublock.iter().zip(PERM_2.iter()) {
-        iblock[at] = (u ^ NBMASK).wrapping_sub(NBMASK) as i32;
-    }
-    // perform decorrelating transform: along y, then along x
-    for x in 0..4 {
-        inv_lift(iblock, x, 4);
-    }
-    for y in 0..4 {
-        inv_lift(iblock, 4 * y, 1);
-    }
-    bits
-}
-
-/// `zfp_encode_block_float_2`: a block of four by four floats, row by row, coded into `s` with
-/// the settings `zfp`. The answer is the bits written.
-pub fn encode_block_float_2(zfp: &ZfpStream, s: &mut BitStream, fblock: &[f32; BLOCK_SIZE]) -> u32 {
-    let mut bits = 1u32;
-    // compute maximum exponent
-    let emax = exponent_block(fblock);
-    let maxprec = precision(emax, zfp.maxprec, zfp.minexp);
-    let e = if maxprec != 0 {
-        (emax + EBIAS) as u32
-    } else {
-        0
-    };
-    // encode block only if biased exponent is nonzero
-    if e != 0 {
-        // encode common exponent; LSB indicates that exponent is nonzero
-        bits += EBITS;
-        s.write_bits(u64::from(2 * e + 1), bits);
-        // perform forward block-floating-point transform
-        let scale = power_of_two(30 - emax);
-        let mut iblock = [0i32; BLOCK_SIZE];
-        for (i, &f) in iblock.iter_mut().zip(fblock.iter()) {
-            *i = float_to_int(scale * f);
+    let len = BLOCK_LEN as u32;
+    let start = stream.read_position();
+    let mut significant = 0;
+    for plane in (lowest_plane(precision)..INT_PRECISION).rev() {
+        let mut x = stream.read_bits(significant);
+        while significant < len && stream.read_bit() {
+            while significant < len - 1 && !stream.read_bit() {
+                significant += 1;
+            }
+            x += 1 << significant;
+            significant += 1;
         }
-        // encode integer block
-        bits += encode_int_block(
-            s,
-            zfp.minbits - bits.min(zfp.minbits),
-            zfp.maxbits - bits,
-            maxprec,
-            &mut iblock,
-        );
-    } else {
-        // write single zero-bit to indicate that all values are zero
-        s.write_bit(0);
-        if zfp.minbits > bits {
-            s.pad(zfp.minbits - bits);
-            bits = zfp.minbits;
-        }
+        deposit_bit_plane(coefficients, plane, x);
     }
-    bits
-}
-
-/// `zfp_decode_block_float_2`: a block of four by four floats, row by row, decoded from `s`
-/// with the settings `zfp` (those it was coded with). The answer is the bits read.
-pub fn decode_block_float_2(
-    zfp: &ZfpStream,
-    s: &mut BitStream,
-    fblock: &mut [f32; BLOCK_SIZE],
-) -> u32 {
-    let mut bits = 1u32;
-    // test if block has nonzero values
-    if s.read_bit() != 0 {
-        // decode common exponent
-        bits += EBITS;
-        let emax = s.read_bits(EBITS) as i32 - EBIAS;
-        let maxprec = precision(emax, zfp.maxprec, zfp.minexp);
-        // decode integer block
-        let mut iblock = [0i32; BLOCK_SIZE];
-        bits += decode_int_block(
-            s,
-            zfp.minbits - bits.min(zfp.minbits),
-            zfp.maxbits - bits,
-            maxprec,
-            &mut iblock,
-        );
-        // perform inverse block-floating-point transform
-        let scale = power_of_two(emax - 30);
-        for (f, &i) in fblock.iter_mut().zip(iblock.iter()) {
-            *f = scale * i as f32;
-        }
-    } else {
-        // set all values to zero
-        *fblock = [0.0; BLOCK_SIZE];
-        if zfp.minbits > bits {
-            s.skip(zfp.minbits - bits);
-            bits = zfp.minbits;
-        }
-    }
-    bits
+    (stream.read_position() - start) as u32
 }

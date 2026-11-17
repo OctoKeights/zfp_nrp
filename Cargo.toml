@@ -1,7 +1,7 @@
 [package]
 name = "zfp_nrp"
-description = "ZFP in pure, safe Rust: a native port of the zfp library's coder of blocks of four by four floats and its stream of bits, giving the bits zfp gives."
-version = "0.1.0"
+description = "ZFP compression of f32 blocks in pure, safe Rust: a native port of the zfp library's block coder, bit-identical to zfp."
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.100"
 license = "BSD-3-Clause"
