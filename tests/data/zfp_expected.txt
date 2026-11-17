@@ -1,0 +1,8 @@
+zfp 200 e1bf1e2f2eb90fae
+zfp 400 ab58495691aa094c
+zfp 600 0896c6be308f5cf1
+zfp blocks: 12074
+zfp 200 272cbc7305e89a62
+zfp 400 7459ee6ad9dba778
+zfp 600 fbc436ae74ad29f7
+zfp blocks: 11625
