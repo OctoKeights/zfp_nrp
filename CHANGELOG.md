@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1
+
+- **Stricter lints, enforced in CI.** `Cargo.toml` turns on clippy's pedantic group for every
+  target, and forbids `unsafe` code in the tests, examples and benchmarks as well as the
+  library. Functions whose result should not be ignored are marked `#[must_use]`.
+
+- Output is unchanged, checked against zfp on 400,000 streams, and so is speed.
+
 ## 0.2.0
 
 - **Breaking: an idiomatic API.** `ZfpStream` is now `Settings`, built by one constructor

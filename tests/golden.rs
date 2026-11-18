@@ -1,4 +1,4 @@
-//! zfp_nrp against hashes recorded from zfp, so that any change in output shows without a C
+//! `zfp_nrp` against hashes recorded from zfp, so that any change in output shows without a C
 //! compiler.
 //!
 //! `tests/data/zfp_expected.txt` is what `compare/dump_zfp.c`, built against zfp 1.0.1,

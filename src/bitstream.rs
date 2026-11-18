@@ -22,6 +22,7 @@ impl BitStream {
     /// A stream over `words`, positioned at the start. To write a field, give it as many
     /// words as [`Settings::max_stream_len`](crate::Settings::max_stream_len) allows (bytes
     /// divided by eight).
+    #[must_use]
     pub fn new(words: Vec<u64>) -> Self {
         Self {
             words,
@@ -31,6 +32,7 @@ impl BitStream {
 
     /// A stream over `bytes`, read as little-endian words, with at least `min_words` words
     /// (zeros after the bytes).
+    #[must_use]
     pub fn from_bytes(bytes: &[u8], min_words: usize) -> Self {
         let mut words: Vec<u64> = bytes
             .chunks(8)
@@ -48,6 +50,7 @@ impl BitStream {
 
     /// The words written so far, as little-endian bytes. Call [`flush`](Self::flush) first
     /// to include the last, partial word.
+    #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         self.words[..self.next]
             .iter()
@@ -56,21 +59,25 @@ impl BitStream {
     }
 
     /// All the stream's words.
+    #[must_use]
     pub fn words(&self) -> &[u64] {
         &self.words
     }
 
     /// The bytes of the whole words written or read so far (`stream_size`).
+    #[must_use]
     pub fn byte_len(&self) -> usize {
         self.next * 8
     }
 
     /// The position of the next bit to read (`stream_rtell`).
+    #[must_use]
     pub fn read_position(&self) -> u64 {
         self.next as u64 * 64 - u64::from(self.buffered)
     }
 
     /// The position of the next bit to write (`stream_wtell`).
+    #[must_use]
     pub fn write_position(&self) -> u64 {
         self.next as u64 * 64 + u64::from(self.buffered)
     }

@@ -1,4 +1,4 @@
-//! The Rust side of the comparison with zfp: runs zfp_nrp over synthetic data and prints a
+//! The Rust side of the comparison with zfp: runs `zfp_nrp` over synthetic data and prints a
 //! running hash of its output, as `compare/dump_zfp.c` does with zfp. `compare/compare.sh`
 //! compares the two.
 //!
@@ -21,11 +21,10 @@ fn main() {
         std::process::exit(2);
     };
     let _ = seed;
-    match what.as_str() {
-        "zfp" => print!("{}", made_up::zfp(seed, count)),
-        _ => {
-            eprintln!("unknown dump {what}");
-            std::process::exit(2);
-        }
+    if what.as_str() == "zfp" {
+        print!("{}", made_up::zfp(seed, count));
+    } else {
+        eprintln!("unknown dump {what}");
+        std::process::exit(2);
     }
 }

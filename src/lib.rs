@@ -85,6 +85,7 @@ impl Default for Settings {
 impl Settings {
     /// zfp's defaults (`zfp_stream_open`): every limit at its widest, which codes blocks
     /// nearly losslessly.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             min_bits: MIN_BITS,
@@ -100,6 +101,7 @@ impl Settings {
     ///
     /// A rate that is not a number, or too large for a block, is converted as zfp converts
     /// it on x86-64.
+    #[must_use]
     pub fn fixed_rate(rate: f64) -> Self {
         let bits = x86_f64_to_u32((f64::from(VALUES_PER_BLOCK) * rate + 0.5).floor()).max(9);
         Self {
@@ -111,6 +113,7 @@ impl Settings {
 
     /// Fixed-precision mode (`zfp_stream_set_precision`): `precision` bit planes per block,
     /// at most 64; 0 codes them all.
+    #[must_use]
     pub fn fixed_precision(precision: u32) -> Self {
         let max_precision = match precision {
             0 => MAX_PRECISION,
@@ -125,6 +128,7 @@ impl Settings {
     /// Fixed-accuracy mode (`zfp_stream_set_accuracy`): no value off by more than
     /// `tolerance`. zfp codes down to the largest power of two no larger than it; a
     /// tolerance of zero or less (or not a number) codes as finely as it can.
+    #[must_use]
     pub fn fixed_accuracy(tolerance: f64) -> Self {
         let min_exponent = if tolerance > 0.0 {
             frexp_exponent(tolerance) - 1
@@ -138,21 +142,25 @@ impl Settings {
     }
 
     /// The fewest bits a block takes; shorter blocks are padded with zeros.
+    #[must_use]
     pub const fn min_bits(&self) -> u32 {
         self.min_bits
     }
 
     /// The most bits a block takes.
+    #[must_use]
     pub const fn max_bits(&self) -> u32 {
         self.max_bits
     }
 
     /// The most bit planes coded.
+    #[must_use]
     pub const fn max_precision(&self) -> u32 {
         self.max_precision
     }
 
     /// The lowest exponent of a bit coded.
+    #[must_use]
     pub const fn min_exponent(&self) -> i32 {
         self.min_exponent
     }
@@ -162,6 +170,7 @@ impl Settings {
     ///
     /// As in zfp, a field with a width but no height counts as one-dimensional, and a field
     /// with no width takes nothing.
+    #[must_use]
     pub fn max_stream_len(&self, width: usize, height: usize) -> usize {
         let (dimensions, blocks) = match (width, height) {
             (0, _) => return 0,
@@ -192,6 +201,7 @@ impl Settings {
 
     /// Codes `blocks` one after another and returns the stream's bytes, in whole 64-bit
     /// words, little-endian.
+    #[must_use]
     pub fn compress(&self, blocks: &[Block]) -> Vec<u8> {
         let words = self.max_stream_len(BLOCK_LEN * blocks.len(), 4) / 8;
         let mut stream = BitStream::new(vec![0; words]);
@@ -203,6 +213,7 @@ impl Settings {
     }
 
     /// Decodes `count` blocks from `bytes`, as [`compress`](Self::compress) makes them.
+    #[must_use]
     pub fn decompress(&self, bytes: &[u8], count: usize) -> Vec<Block> {
         let mut stream = BitStream::from_bytes(bytes, 0);
         let mut blocks = vec![[0.0; BLOCK_LEN]; count];
@@ -292,10 +303,11 @@ mod tests {
 
     #[test]
     fn powers_of_two_round_as_ldexpf() {
-        assert_eq!(power_of_two(0), 1.0);
-        assert_eq!(power_of_two(-149), f32::from_bits(1));
-        assert_eq!(power_of_two(-150), 0.0);
-        assert_eq!(power_of_two(128), f32::INFINITY);
+        // (Compared bit for bit: the values must be exactly these.)
+        assert_eq!(power_of_two(0).to_bits(), 1.0f32.to_bits());
+        assert_eq!(power_of_two(-149).to_bits(), 1);
+        assert_eq!(power_of_two(-150).to_bits(), 0.0f32.to_bits());
+        assert_eq!(power_of_two(128).to_bits(), f32::INFINITY.to_bits());
     }
 
     #[test]
@@ -311,10 +323,8 @@ mod tests {
     fn blocks_round_trip() {
         let block: Block = core::array::from_fn(|k| k as f32 - 7.5);
         for settings in [Settings::new(), Settings::fixed_precision(32)] {
-            assert_eq!(
-                settings.decompress(&settings.compress(&[block]), 1)[0],
-                block
-            );
+            let decoded = settings.decompress(&settings.compress(&[block]), 1)[0];
+            assert_eq!(decoded.map(f32::to_bits), block.map(f32::to_bits));
         }
     }
 }

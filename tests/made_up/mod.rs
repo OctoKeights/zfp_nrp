@@ -21,8 +21,8 @@ impl Random {
     pub fn next(&mut self) -> u32 {
         self.state = self
             .state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         (self.state >> 32) as u32
     }
 }
@@ -35,14 +35,14 @@ pub struct Hash {
 impl Hash {
     pub fn new() -> Hash {
         Hash {
-            value: 14695981039346656037,
+            value: 14_695_981_039_346_656_037,
         }
     }
 
     pub fn add(&mut self, data: &[u8]) {
         for &byte in data {
             self.value ^= u64::from(byte);
-            self.value = self.value.wrapping_mul(1099511628211);
+            self.value = self.value.wrapping_mul(1_099_511_628_211);
         }
     }
 }
@@ -103,15 +103,15 @@ fn make_block(r: &mut Random) -> [f32; 16] {
             block = [f32::from_bits(bits); 16];
         }
         1 => {
-            let a = (r.next() % 2001) as i32 - 1000;
-            let b = (r.next() % 201) as i32 - 100;
-            let c = (r.next() % 201) as i32 - 100;
-            let e = (r.next() % 60) as i32 - 30;
-            let s = f32::from_bits(((e + 127) as u32) << 23);
-            for j in 0..4 {
-                for i in 0..4 {
-                    block[j * 4 + i] = (a + b * i as i32 + c * j as i32) as f32 * s;
-                }
+            // A plane, scaled by a power of two.
+            let base = (r.next() % 2001) as i32 - 1000;
+            let slope_x = (r.next() % 201) as i32 - 100;
+            let slope_y = (r.next() % 201) as i32 - 100;
+            let exponent = (r.next() % 60) as i32 - 30;
+            let scale = f32::from_bits(((exponent + 127) as u32) << 23);
+            for (k, value) in block.iter_mut().enumerate() {
+                let (x, y) = ((k % 4) as i32, (k / 4) as i32);
+                *value = (base + slope_x * x + slope_y * y) as f32 * scale;
             }
         }
         2 => {
@@ -150,13 +150,10 @@ fn make_block(r: &mut Random) -> [f32; 16] {
     block
 }
 
-/// The made-up settings, blocks and streams of `compare/dump_zfp.c`, hashed.
+/// The synthetic settings, blocks and streams of `compare/dump_zfp.c`, hashed.
 pub fn zfp(seed: u64, count: u32) -> String {
+    use std::fmt::Write;
     use zfp_nrp::{BitStream, Settings};
-    let mut r = Random { state: seed };
-    let mut hash = Hash::new();
-    let mut out = String::new();
-    let mut total = 0u64;
     fn add(hash: &mut Hash, value: u32) {
         hash.add(&value.to_le_bytes());
     }
@@ -171,6 +168,10 @@ pub fn zfp(seed: u64, count: u32) -> String {
         }
         add(hash, stream.read_position() as u32);
     }
+    let mut r = Random { state: seed };
+    let mut hash = Hash::new();
+    let mut out = String::new();
+    let mut total = 0u64;
     for round in 0..count {
         // What zfp's zfp_stream_set_* functions return is hashed too: the rate, the precision
         // or the tolerance they set.
@@ -238,9 +239,9 @@ pub fn zfp(seed: u64, count: u32) -> String {
             total += blocks as u64;
         }
         if (round + 1) % 200 == 0 || round + 1 == count {
-            out += &format!("zfp {} {:016x}\n", round + 1, hash.value);
+            writeln!(out, "zfp {} {:016x}", round + 1, hash.value).unwrap();
         }
     }
-    out += &format!("zfp blocks: {total}\n");
+    writeln!(out, "zfp blocks: {total}").unwrap();
     out
 }

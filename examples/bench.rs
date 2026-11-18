@@ -17,8 +17,8 @@ fn synthetic_blocks(count: usize) -> Vec<Block> {
     let mut state = 12345u64;
     let mut noise = move || {
         state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         (state >> 40) as f32 / (1u64 << 24) as f32
     };
     (0..count)
