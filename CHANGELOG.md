@@ -6,7 +6,7 @@
   target, and forbids `unsafe` code in the tests, examples and benchmarks as well as the
   library. Functions whose result should not be ignored are marked `#[must_use]`.
 
-- Output is unchanged, checked against zfp on 400,000 streams, and so is speed.
+- Output is unchanged, checked against zfp on 40,000 streams (768,433 blocks), and so is speed.
 
 ## 0.2.0
 
