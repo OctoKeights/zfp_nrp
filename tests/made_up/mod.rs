@@ -2,14 +2,8 @@
 //! (`compare/dump_zfp.c`) generates it, and the dump that both the golden tests and
 //! `examples/dump.rs` run.
 
-// The arithmetic mirrors the C side, and not every user of this module uses all of it.
-#![allow(
-    clippy::manual_is_multiple_of,
-    clippy::needless_range_loop,
-    clippy::manual_div_ceil,
-    clippy::manual_checked_ops,
-    dead_code
-)]
+// (The golden tests and the dump each use only part of this module.)
+#![allow(dead_code)]
 
 /// The two programs make the same blocks from the same seed: a 64-bit linear congruential
 /// generator, the high half of its state.
@@ -99,7 +93,11 @@ fn make_block(r: &mut Random) -> [f32; 16] {
     let mut block = [0f32; 16];
     match r.next() % 8 {
         0 => {
-            let bits = if r.next() % 2 != 0 { 0x8000_0000 } else { 0 };
+            let bits = if !r.next().is_multiple_of(2) {
+                0x8000_0000
+            } else {
+                0
+            };
             block = [f32::from_bits(bits); 16];
         }
         1 => {
@@ -224,7 +222,7 @@ pub fn zfp(seed: u64, count: u32) -> String {
             hash.add(&bytes);
             decode_all(&settings, &mut hash, &bytes, words, blocks);
 
-            if r.next() % 2 == 0 && !bytes.is_empty() {
+            if r.next().is_multiple_of(2) && !bytes.is_empty() {
                 let flips = 1 + r.next() % 4;
                 for _ in 0..flips {
                     let bit = r.next() % (bytes.len() as u32 * 8);
