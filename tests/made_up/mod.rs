@@ -93,10 +93,10 @@ fn make_block(r: &mut Random) -> [f32; 16] {
     let mut block = [0f32; 16];
     match r.next() % 8 {
         0 => {
-            let bits = if !r.next().is_multiple_of(2) {
-                0x8000_0000
-            } else {
+            let bits = if r.next().is_multiple_of(2) {
                 0
+            } else {
+                0x8000_0000
             };
             block = [f32::from_bits(bits); 16];
         }
